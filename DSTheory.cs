@@ -203,6 +203,46 @@ namespace SwagShopLibrary
                
             }
 
+            //compute mass function from commonality function
+
+            public string Filter(string str, List<char> charsToRemove)
+            {
+                foreach (char c in charsToRemove) str = str.Replace(c.ToString(), String.Empty);
+                return str;
+            }
+            public Dictionary<string,double> fromCommonality(Dictionary<string,double> commFunc)
+            {
+                Dictionary<string, double> massFromComm = new Dictionary<string, double>();
+
+                // get the key of the maximum value in the plausible function
+                //commFunc.Remove("");
+                var q_max = commFunc.Aggregate((l, r) => l.Value > r.Value ? l : r).Key;
+                foreach (var h1 in commFunc.Keys)
+                {
+                    //int aCount = h1.Length;
+                    double sum = 0.0;
+                    List<char> h1_list = new List<char>(h1);
+                    var remaining = Filter(q_max, h1_list);
+                    foreach (var h2 in CalculateCombinationsList(remaining))
+                    {
+                        //int bCount = h2.Length;
+                        List<char> h2_list = new List<char>(h2);
+                        var union = h1_list.Union(h2_list).ToList();
+
+                        foreach (var key in commFunc.Keys)
+                        {
+                            var chars = new List<char>(key);
+                            var check = union.All(chars.Contains) && union.Count == chars.Count;
+                            if (check) sum += Math.Pow(-1, (Filter(h2,h1_list).Length)) * commFunc[key]; 
+                        }
+                    }
+                    if (!massFromComm.ContainsKey(h1) && sum > 0) massFromComm[h1] = sum;
+
+                }
+
+                return massFromComm;
+            }
+
             public Dictionary<string,double> combine(Dictionary<string, double> mf1, Dictionary<string, double> mf2, bool normalization, int sample_count, bool importance_sampling, bool isDisjunctive)
             {
                 Dictionary<string, double> combined = new Dictionary<string, double>();
@@ -243,6 +283,10 @@ namespace SwagShopLibrary
                             m = new string(String.Concat(mixed).ToCharArray().Distinct().ToArray());
                         }
 
+
+                        //if abc was there but say bac came then they must add. rather than create a new key
+                        foreach (var i in combined.Keys) if (checkEquality(m,i)) m = i;
+                        
                         if (!combined.ContainsKey(m))
                         {
                             combined[m]= mf1[item] * mf2[item2];
@@ -254,6 +298,10 @@ namespace SwagShopLibrary
                             
                     }
                 }
+
+                // normalize to remove the ignorance
+                combined = normalizeRemoveIgnorance(combined);
+
                 return combined;
             }
 
@@ -371,15 +419,31 @@ namespace SwagShopLibrary
             }
 
             public Dictionary<string,double> normalize(Dictionary<string,double> mf)
-            {               
+            {
                 double mass_sum = mf.Sum(x => x.Value);
-                if(mass_sum!=1.0)
+                var keyList = mf.Keys.ToList();
+                if (mass_sum != 1.0)
                 {
-                    foreach (var item in mf.Keys)
+                    foreach (var item in keyList)
                     {
                         mf[item] = mf[item] / mass_sum;
                     }
                 }
+                return mf;
+            }
+
+            public Dictionary<string, double> normalizeRemoveIgnorance(Dictionary<string, double> mf)
+            {
+                double mass_sum = mf.Where(x=>x.Key!="").Sum(x => x.Value);
+                var keyList = mf.Keys.ToList();
+                if (mass_sum != 1.0)
+                {
+                    foreach (var item in keyList)
+                    {
+                        mf[item] = mf[item] / mass_sum;
+                    }
+                }
+                if (mf.ContainsKey("")) mf.Remove("");
                 return mf;
             }
             // Got to fix this one
@@ -483,7 +547,19 @@ namespace SwagShopLibrary
                 if (index == likelihoods.Count)
                 {
                     var unique = new string(String.Concat(hyp+ones).ToCharArray().Distinct().ToArray());
-                    m[unique] = mass;
+                    var found = false;
+                    foreach (var key in m.Keys)
+                    {
+                        var keychars = new List<char>(key);
+                        var check = checkCharList(new List<char>(unique), keychars);
+                        if (check)
+                        {
+                            m[key] += mass;
+                            found = true;
+                            break;
+                        } 
+                    }
+                    if(!found) m[unique] = mass;
                 }
                 else
                 {
@@ -492,12 +568,17 @@ namespace SwagShopLibrary
                 }
             }
 
+            public bool checkCharList(List<char> a, List<char> b)
+            {
+                return a.All(b.Contains) && a.Count == b.Count;
+            }
+
             /*Combines the mass function with another mass function using the cautious rule and returns the combination as a new mass function.
         
         For more details, see:
         T. Denoeux (2008), "Conjunctive and disjunctive combination of belief functions induced by nondistinct bodies of evidence",
         Artificial Intelligence 172, 234-264.*/
-            public Dictionary<string,double> combineCautious(Dictionary<string, double> mf1, Dictionary<string, double> mf2)
+            public Dictionary<string,double> combineCautious(Dictionary<string, double> mf1, Dictionary<string, double> mf2, bool disjunctive)
             {
                 MassFunction m1 = new MassFunction(mf1);
                 m1.ComputeFocalSet();
@@ -508,11 +589,11 @@ namespace SwagShopLibrary
                 m2.ComputeFrameOfDiscernment();
                 
 
-                string all = "", all2 = "";
+                string all = "", theta = "";
                 foreach (var item in mf1.Keys)
                 {
                    all += item;
-                   all2 = new string(String.Concat(all).ToCharArray().Distinct().ToArray());
+                   theta = new string(String.Concat(all).ToCharArray().Distinct().ToArray());
                 }
                 var w1 = m1.weight_function();
                 var w2 = m2.weight_function();
@@ -530,10 +611,14 @@ namespace SwagShopLibrary
                             if (d.Contains(i)) replacedItem = i;
                         }
                     }
-                    var x = w1[item] < w2[replacedItem] ? w1[item] : w2[replacedItem];
-                    wmin.Add(item,x);
+                    if(w2.ContainsKey(replacedItem))
+                    {
+                        var x = w1[item] < w2[replacedItem] ? w1[item] : w2[replacedItem];
+                        wmin.Add(item, x);
+                    }
+                    
                 }
-                Dictionary<string, double> one = new Dictionary<string, double> { { all2,1.0} };
+                Dictionary<string, double> one = new Dictionary<string, double> { { theta,1.0} };
                 MassFunction m = new MassFunction(one);
                 m.ComputeFocalSet();
                 m.ComputeFrameOfDiscernment();
@@ -541,11 +626,18 @@ namespace SwagShopLibrary
 
                 foreach (var item in wmin.Keys)
                 {
-                    MassFunction m_simple = new MassFunction( new Dictionary<string, double> { { all2, 1.0 }, { item, (1.0 - wmin[item]) } });
+                    MassFunction m_simple = new MassFunction( new Dictionary<string, double> { { theta, wmin[item] }, { item, (1.0 - wmin[item]) } });
                     m_simple.ComputeFocalSet();
                     m_simple.ComputeFrameOfDiscernment();
-                    
-                    m.hyp_value = combine(m.hyp_value, m_simple.hyp_value, false, 0, false, false);
+                    if (disjunctive)
+                    { 
+                        m.hyp_value = combine(m.hyp_value, m_simple.hyp_value, false, 0, false, true); 
+                    }
+                    else
+                    {
+                        m.hyp_value = combine(m.hyp_value, m_simple.hyp_value, false, 0, false, false);
+                    }
+
                 }
 
                 return m.hyp_value;
@@ -553,7 +645,8 @@ namespace SwagShopLibrary
 
 
             //public Dictionary<string,double> markov()
-            //Computes the weight function corresponding to this mass function.
+            //Computes the weight function corresponding to this mass function. 
+            // The weights are computed based on the commonality function. 
             public Dictionary<string,double> weight_function()
             {
                 Dictionary<string, double> weights = new Dictionary<string, double>();
@@ -625,12 +718,118 @@ namespace SwagShopLibrary
                 }
             }
 
+            static bool checkEquality(string a, string b)
+            {
+                if (a.Length == b.Length)
+                {
+                    foreach (char c in a)
+                    {
+                        if (b.Contains(c)) continue;
+                        else return false;
+                    }
+                }
+                else return false;
+                return true;
+            }
+
             static void swap(ref char a, ref char b)
             {
                 char tmp;
                 tmp = a;
                 a = b;
                 b = tmp;
+            }
+
+            //Calculates the weight of conflict between two or more mass functions.
+            public double conflict(MassFunction m1, MassFunction m2, int sample_count)
+            {
+                var combined = combine(m1.hyp_value, m2.hyp_value, false,sample_count, false, false);
+                var sum = combined.Sum(x => x.Value);
+                if (sum == 0.0) return 10000000.0; // return some infinite number
+                else return -Math.Log(sum);              
+            }
+
+            // Computes the local conflict measure.
+            // returns 0 for unnormalized mass function
+            public double local_conflict()
+            {
+                double sum = 0.0;
+                foreach (var key in this.hyp_value.Keys)
+                {
+                    var value = this.hyp_value[key];
+                    if (key == "" && this.hyp_value[key] > 0.0) return 0.0;                   
+                    else sum += value * Math.Log(key.Length / value, 2);
+                }
+                return sum;
+            }
+
+            //  Removes all non-focal (0 mass) hypotheses in-place.
+            public void prune()
+            {
+                var item = this.hyp_value.First(kvp => kvp.Value == 0.0);
+
+                this.hyp_value.Remove(item.Key);
+            }
+
+            // computes the p-norm between two mass function
+            public double norm(MassFunction m1, MassFunction m2, int p)
+            {
+                double sum = 0.0;
+                foreach (var key in m1.hyp_value.Keys)
+                {
+                    if(m2.hyp_value.ContainsKey(key)) sum += Math.Pow(m1.hyp_value[key] - m2.hyp_value[key], p);
+                }
+                foreach (var key in m2.hyp_value.Keys)
+                {
+                    if (!m1.hyp_value.ContainsKey(key))
+                    {
+                        sum += Math.Pow(m2.hyp_value[key], p);
+                    }
+                }
+
+                return Math.Pow(sum,1.0/p);
+            }
+            //Computes the Hartley-like measure in order to quantify the amount of imprecision.
+
+            //For more information, see:
+        //G.J.Klir(1999), "Uncertainty and information measures for imprecise probabilities: An overview",
+        //International Symposium on Imprecise Probabilities and Their Applications.
+            public double hartley_measure(Dictionary<string,double> hyp_value )
+            {
+                double sum = 0.0;
+                foreach (var key in hyp_value.Keys)
+                {
+                    if (key.Length == 0) sum += 0;
+                    else sum += hyp_value[key] * Math.Log(key.Length, 2.0);
+                }
+                return sum;
+            }
+
+            //Computes the pignistic transformation and returns it as a new mass function consisting only of singletons.
+            public Dictionary<string,double> pignistic()
+            {
+                Dictionary<string, double> p = new Dictionary<string, double>();
+                foreach (var key in this.hyp_value.Keys)
+                {
+                    if (this.hyp_value[key] > 0.0)
+                    {
+                        var charList = new List<char>(key);
+                        foreach ( var character in charList)
+                        {
+                            if (p.ContainsKey(character.ToString()))
+                            {
+                                p[character.ToString()] += this.hyp_value[key] / charList.Count;
+                            }
+                            else
+                            {
+                                p.Add(character.ToString(), this.hyp_value[key] / charList.Count);
+                            }
+                        }
+                    }
+
+                }
+
+                return normalize(p);
             }
         }
     }
